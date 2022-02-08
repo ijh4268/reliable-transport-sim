@@ -7,6 +7,7 @@ from time import sleep
 from threading import Timer
 import struct
 import heapq
+import hashlib
 
 TIMEOUT = 0.25
 HEADER_SIZE = 6
@@ -28,6 +29,8 @@ class Streamer:
         self.ack = False
         self.fin = False
         self.finack = False
+        self.hash = hashlib.md5()
+        self.header_size = 6 + self.hash.digest_size
         
         executor = ThreadPoolExecutor(max_workers=1)
         executor.submit(self.listener)
@@ -40,7 +43,10 @@ class Streamer:
         data, addr = self.socket.recvfrom()
         # ! -5 from len(data) to account for header size
         if data:
-            unpacked_data = struct.unpack(f'!i{len(data) - HEADER_SIZE}s??', data)
+            unpacked_data = struct.unpack(f'!i{len(data) - self.header_size}s??{self.hash.digest_size}s', data)
+            self.hash = hashlib.md5()
+            self.hash.update(unpacked_data[1])
+            hash = self.hash.digest()
             self.ack = unpacked_data[2]
             self.fin = unpacked_data[3]
             if self.fin and self.ack:
@@ -48,11 +54,12 @@ class Streamer:
                 self.finack = True
             elif self.fin:
                 print("FIN packet received.")
-            if not self.ack and unpacked_data not in self.recv_buf: 
+            if not self.ack and unpacked_data not in self.recv_buf and hash == unpacked_data[4]: 
                 heapq.heappush(self.recv_buf, unpacked_data)
+            else: return True
 
     def _send_ack(self):
-        ack = struct.pack(f'!i1s??', self.seq, b'', True, self.fin)
+        ack = struct.pack(f'!i1s??{self.hash.digest_size}s', self.seq, b'', True, self.fin, self.hash.digest())
         self.socket.sendto(ack, (self.dst_ip, self.dst_port))
 
     def resend(self, packet):
@@ -63,8 +70,8 @@ class Streamer:
     def listener(self):
         while not self.closed:
             try:
-                self._fetch_data()
-                if not self.ack: self._send_ack()
+                drop = self._fetch_data()
+                if not self.ack and not drop: self._send_ack()
             except Exception as e:
                 print("ERROR: listener died!")
                 print(e)
@@ -75,10 +82,13 @@ class Streamer:
         packet_size = 1472 # ! packet size is 1472 bytes
         # * if the data_bytes is larger than the size of a packet, then we need to chunk it. 
         # ! -5 from packet size to account for header (4 byte seq int, 1 byte bool)
-        data_chunks = list(self._chunk(data_bytes, packet_size-HEADER_SIZE))
+        data_chunks = list(self._chunk(data_bytes, packet_size-self.header_size))
         # for now I'm just sending the raw application-level data in one UDP payload
         for chunk in data_chunks:
-            packet = struct.pack(f'!i{len(chunk)}s??', self.seq, chunk, False, self.fin)
+            self.hash = hashlib.md5()
+            self.hash.update(chunk)
+            hash = self.hash.digest()
+            packet = struct.pack(f'!i{len(chunk)}s??{self.hash.digest_size}s', self.seq, chunk, False, self.fin, hash)
             self.socket.sendto(packet, (self.dst_ip, self.dst_port))
             self.started = False
             while not self.ack:
@@ -112,7 +122,7 @@ class Streamer:
         """Cleans up. It should block (wait) until the Streamer is done with all
            the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
-        fin_packet = struct.pack('!i1s??', -1, b'', False, True)
+        fin_packet = struct.pack(f'!i1s??{self.hash.digest_size}s', -1, b'', False, True, self.hash.digest())
         self.socket.sendto(fin_packet, (self.dst_ip, self.dst_port))
         self.started = False
         while not self.finack:

@@ -9,7 +9,7 @@
       "type": "python",
       "request": "launch",
       "program": "${file}",
-      "args": ["8000", "8001", "1"],
+      "args": ["9000", "9001", "1"],
       "console": "integratedTerminal"
     },
     {
@@ -17,7 +17,7 @@
       "type": "python",
       "request": "launch",
       "program": "${file}",
-      "args": ["8000", "8001", "2"],
+      "args": ["9000", "9001", "2"],
       "console": "integratedTerminal"
     }
   ]
