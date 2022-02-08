@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from lossy_socket import LossyUDP
 # do not import anything else from socket except INADDR_ANY
 from socket import INADDR_ANY
+from time import sleep
 import struct
 import heapq
 
@@ -20,7 +21,8 @@ class Streamer:
         self.seq = 0
         self.expected_seq = 0
         self.recv_buf = []
-
+        self.ack = False
+        
         executor = ThreadPoolExecutor(max_workers=1)
         executor.submit(self.listener)
 
@@ -30,15 +32,21 @@ class Streamer:
 
     def _fetch_data(self):
         data, addr = self.socket.recvfrom()
-        # ! -4 from len(data) to account for header size
+        # ! -5 from len(data) to account for header size
         if data:
-            unpacked_data = struct.unpack(f'!i{len(data) - 4}s', data)
-            heapq.heappush(self.recv_buf, unpacked_data)
+            unpacked_data = struct.unpack(f'!i{len(data) - 5}s?', data)
+            self.ack = True if unpacked_data[2] else False
+            if not self.ack: heapq.heappush(self.recv_buf, unpacked_data)
+
+    def _send_ack(self):
+        ack = struct.pack(f'!i1s?', self.seq, b'', True)
+        self.socket.sendto(ack, (self.dst_ip, self.dst_port))
 
     def listener(self):
         while not self.closed:
             try:
                 self._fetch_data()
+                if not self.ack: self._send_ack()
             except Exception as e:
                 print("ERROR: listener died!")
                 print(e)
@@ -48,13 +56,15 @@ class Streamer:
         # Your code goes here!  The code below should be changed!
         packet_size = 1472 # ! packet size is 1472 bytes
         # * if the data_bytes is larger than the size of a packet, then we need to chunk it. 
-        # ! -4 from packet size to account for header (4 byte seq int)
-        data_chunks = list(self._chunk(data_bytes, packet_size-4))
+        # ! -5 from packet size to account for header (4 byte seq int, 1 byte bool)
+        data_chunks = list(self._chunk(data_bytes, packet_size-5))
         # for now I'm just sending the raw application-level data in one UDP payload
         for chunk in data_chunks:
-            packet = struct.pack(f'!i{len(chunk)}s', self.seq, chunk)
+            packet = struct.pack(f'!i{len(chunk)}s?', self.seq, chunk, False)
             self.socket.sendto(packet, (self.dst_ip, self.dst_port))
             self.seq += 1
+            while not self.ack:
+                sleep(0.01)
 
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
